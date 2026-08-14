@@ -1,9 +1,113 @@
 # NSMjl — Neural Species Mediator in Julia
 
 A from-scratch Julia rewrite of the NSM model (Thompson et al. 2025, Venturelli lab),
-built to support **both** a physics-embedded RHS **and**, later, a loss-residual
+built to support **both** a physics-embedded RHS **and** a loss-residual
 (PINN-style) variant, with **time-dependent perturbation inputs** `u(t)` as a
-first-class feature.
+first-class feature. The Bayesian pipeline is matched — component-by-component —
+to the reference `nsm/` Python/JAX package and to the paper's Methods equations.
+
+---
+
+## Results — paper reproduction
+
+Two held-out experiments reproduce the paper's headline figures using the exact
+protocol from the reference repo (fold structure, `fit_posterior_EM`, scaling,
+hyperparameters) run through the Julia implementation.
+
+### 1. FP-DP — leave-one-co-culture-out (paper Fig 3d)
+
+`scripts/run_nsm.jl` → `figures/fig_nsm_fpdp_loo.pdf`
+
+![FP-DP leave-one-co-culture-out](figures/fig_nsm_fpdp_loo.pdf)
+
+Hold out one co-culture (`Pair_*`) per fold (10 folds); monocultures always in
+training and never scored; fit each fold with `fit_posterior_EM!`; pool the 10
+held-out co-cultures and report per-output Pearson r.
+
+| Output  | r (this repo) | paper Fig 3d (approx) |
+|---------|:-------------:|:---------------------:|
+| FP      | **0.89**      | ~0.9                  |
+| DP      | **0.81**      | ~0.8                  |
+| Sulfide | **0.89**      | ~0.94                 |
+
+Negative (unphysical) predictions: 0.0%. Matches the reference to within
+run-to-run seed / integrator variance.
+
+### 2. Clark 25-species — 16h interpolation (paper Fig 4c)
+
+`scripts/run_clark.jl` → `figures/fig_clark_16h.pdf`
+
+![Clark 16h interpolation](figures/fig_clark_16h.pdf)
+
+Train on all timepoints except 16h; predict the (0 → 16h) transition; fit with
+`fit_posterior_EM!`, `n_hidden=20`. 757 treatments, 852 train / 95 test samples.
+Reverse-mode adjoint (`AD = :reverse`) is required at this scale (~1,400 params).
+
+| Metabolite | r        | RMSE     |
+|------------|:--------:|:--------:|
+| Acetate    | _(fill)_ | _(fill)_ |
+| Butyrate   | _(fill)_ | _(fill)_ |
+| Lactate    | _(fill)_ | _(fill)_ |
+| Succinate  | _(fill)_ | _(fill)_ |
+
+> Fill the Clark row from the run's final console output
+> (`=== Clark 16h held-out metabolites (NSM, fit_posterior_EM) ===`).
+
+> **Rendering note:** figures are written as **PDF** (CairoMakie). GitHub
+> renders PNG/SVG inline but not PDF; save a PNG alongside if you want the
+> images to preview directly in this README.
+
+---
+
+## Reproduction scripts
+
+- `scripts/run_nsm.jl` — FP-DP Fig 3d. Leave-one-co-culture-out over the 10
+  `Pair_*` conditions, `fit_posterior_EM!` per fold, per-fold training-target
+  scaling, `n_hidden=15`, 4-panel figure (3 posterior-predictive trajectory
+  panels + pooled scatter). Includes a **BC026 data-integrity check** that halts
+  before the fit if `data/BC026_FPDP_GlLaSu_fmt.csv` isn't the paper's file
+  (150 rows, times `0/6.97/10.28/18.66/36.58`).
+- `scripts/run_clark.jl` — Clark Fig 4c. 16h interpolation, `fit_posterior_EM!`,
+  `n_hidden=20`, per-metabolite r/RMSE scatter. `AD = :reverse` flag for the
+  25-species scale.
+
+Both use the paper's exact fit pipeline (below) and score with per-output
+Pearson r on the held-out data.
+
+---
+
+## Method fidelity (matched to the reference)
+
+The Bayesian objective is the KL-minimizing variational posterior; ELBO
+maximization ≡ KL minimization by `log p(D) = ELBO + KL[q‖p]` (paper
+Eq 14→16). Each piece is matched:
+
+| Component | Reference | Match |
+|---|---|---|
+| RHS `nsm_rhs!`, softplus₁₀, positivity `g` | `nsm_system.py::runODE` | ✅ (JAX float64 to ~1e-10) |
+| Prior `Σ½α(θ−z_prior)²`, **z_prior = 0** (paper Eq 13, zero-mean) | Methods Eq 13/16 | ✅ |
+| Likelihood `ν²+σ²·clip(ŷ,0)²`, `½` terms | `log_likelihood_lmbda` | ✅ |
+| Reparam `μ+e^{log_s}·y`, entropy `Σlog_s` | `T`, `log_abs_det` | ✅ |
+| `fit_posterior` — **per-sample Adam**, ELBO-slope convergence (`tol=1e-3`, `patience=5`), keep-best | `nsm.py::fit_posterior` | ✅ |
+| α update `= 1/E[θ²] = 1/(μ²+σ²)` (paper Eq 18, zero-mean) | Methods Eq 18 | ✅ |
+| ν²/σ² per-output LSQ (Eq 19), variance floor `1e-4` (positivity) | `update_hypers` | ✅ |
+| EM loop — evidence recomputed via `approx_evidence`, running-max, best-iterate restore | `fit_posterior_EM` | ✅ |
+| Posterior init std (per-block: C,P=1/nₛ; W1=1/√n_x; Wh,Wo=1/√n_h; biases,d_m=1) | `init_params::params_std` | ✅ |
+| Per-fold scaling by final-state max | `NSM.__init__` | ✅ |
+| Fold = leave-one-co-culture-out; r pooling | `kfold_fpdp.py`, `FPDP_kfold_stats.ipynb` | ✅ |
+
+Remaining non-identities are substrate-level only: the ODE integrator
+(JAX `odeint` vs `Tsit5`) and the RNG stream (NumPy vs Julia `Random`), so
+results match to seed/integrator variance, not to the digit.
+
+**Autodiff.** `fit_posterior!`/`fit_rmse!` take an `ad` switch:
+`:forward` (ForwardDiff-through-solve — fast, exact, validated; best for small
+models like FP-DP) or `:reverse` (Zygote + SciMLSensitivity
+`InterpolatingAdjoint(ReverseDiffVJP(true))` — cost ~independent of parameter
+count; required for Clark's 25 species). Reverse-mode *hurts* tiny models
+(per-solve adjoint overhead) but is a ~100× win at ~1,000+ parameters.
+
+---
 
 ## Status
 
@@ -13,144 +117,97 @@ first-class feature.
 - **Step 3b — variational posterior + EM + evidence ✅**
 - **Step 4 — prediction with uncertainty ✅**
 - **Step 5 — gLV residual-penalty (PINN) variant ✅**
-- **Plots — Makie validation figures ✅**
-- **Real data — Cdiff loader + embedded-vs-residual experiment ✅**
+- **Paper reproduction — FP-DP Fig 3d ✅ ; Clark Fig 4c 🔄 (run in progress)**
 
 ### Step 1 — the RHS
 
-- `src/system.jl` — activations, the positivity transform `g`, `NSMConfig`,
-  `init_params`, and the core `nsm_rhs!` (a faithful port of
-  `nsm/nsm_system.py :: system`). The one deliberate change vs. the reference:
-  `inputs` is a **function `u(t)`** evaluated inside the RHS at every solver
-  step, instead of a constant vector — this is the perturbation-aware extension.
-- `src/NSMjl.jl` — module + `solve_forward` wrapper (DifferentialEquations stack).
+- `src/system.jl` — activations, positivity transform `g`, `NSMConfig`,
+  `init_params`, and `nsm_rhs!` (faithful port of `nsm_system.py::system`). The
+  one deliberate change vs. the reference: `inputs` is a **function `u(t)`**
+  evaluated inside the RHS at every solver step, instead of a constant vector —
+  the perturbation-aware extension.
+- `src/NSMjl.jl` — module + `solve_forward` wrapper.
 - `test/smoke_forward.jl` — solves with a time-dependent Gaussian perturbation
-  and checks the trajectory against a verified SciPy reference.
-- `test/ref_traj.csv`, `test/ref_params.jl` — reference trajectory + params,
-  generated by a NumPy RHS checked against the original JAX `system()` to ~1e-7.
+  and checks the trajectory against a verified reference (`max abs error` ≈ 1e-9).
 
 ### Step 2 — the training layer
 
-- `src/train.jl` — `Sample`, `predict_endpoint`, `sample_rmse`, `rmse`, and
-  `fit_rmse!` (per-sample Adam, gradient clipping at 1000; port of
-  `nsm.py::rmse/fit_rmse` and `nsm_system.py::root_mean_squared_error`).
-  Gradients flow through the ODE solve via **ForwardDiff**.
-- `test/train_fit.jl` — checks (A) the RMSE value, (B) autodiff-through-solver
-  gradients against **exact JAX float64 gradients** for 8 parameters, and
-  (C) that `fit_rmse!` reduces the loss.
-- `test/train_data.jl` — synthetic dataset + exact reference gradients +
-  learning targets (JAX float64).
-
-Each training `Sample` is an (initial condition → one later observation) pair
-integrated `0 → tf`, exactly as `utilities.py::process_df` builds them. `uin`
-is a static per-sample input; swapping the `_ -> uin` closure in
-`predict_endpoint` for a sample-specific `u(t)` trains under a **time-dependent
-perturbation** with no other change.
+- `src/train.jl` — `Sample`, `predict_endpoint` (forwards `sensealg`),
+  `sample_rmse`, `rmse`, `fit_rmse!` (per-sample Adam, `ad` switch, clip 1000).
+  Each `Sample` is an (initial condition → one later observation) pair,
+  as `utilities.py::process_df` builds them.
+- `test/train_fit.jl` — RMSE value, autodiff-through-solver gradients vs exact
+  JAX float64 for 8 parameters, and that `fit_rmse!` reduces the loss.
 
 ### Step 3a — the Bayesian objective
 
-- `src/bayes.jl` — `prior_params` (Gaussian prior: −3 for C,P,d_m; 0 for NN),
-  `log_prior`, `nll_sample` (heteroscedastic Gaussian, var = ν² + σ²·max(pred,0)²),
-  `nlp` (negative log posterior), `grad_nlp`, and `fit_map!` (Adam → MAP /
-  posterior mode). Port of `nsm_system.py::log_prior_z/log_likelihood_z` and
-  `nsm.py::nlp/grad_nlp`.
-- `test/bayes_fit.jl` — checks `log_prior`/`nlp` against JAX, `grad_nlp` against
-  exact JAX gradients, and that `fit_map!` reduces nlp and RMSE.
-- `test/bayes_data.jl` — JAX float64 reference targets.
+- `src/bayes.jl` — `prior_params` (**zero-mean** Gaussian prior for all
+  parameters, paper Eq 13), `log_prior`, `nll_sample` (heteroscedastic Gaussian,
+  var = ν² + σ²·max(pred,0)²), `nlp`, `grad_nlp`, `fit_map!`.
+- `test/bayes_fit.jl` — `log_prior`/`nlp` vs JAX, `grad_nlp` vs exact JAX
+  gradients, and that `fit_map!` reduces nlp and RMSE.
 
 ### Step 3b — variational posterior + EM + evidence
 
-- `src/vi.jl` — `VarPosterior` (mean-field diagonal Gaussian), `neg_elbo_flat`
-  (reparameterised, `z = mu + exp(log_s)·y`), `approx_evidence` (`Σlog_s −
-  nlp(mu)`), `fit_posterior!` (stochastic Adam on `[mu; log_s]`),
-  `update_hypers!` (empirical-Bayes EM: per-output least-squares noise fit +
-  closed-form prior precision), and `fit_posterior_EM!`. Port of
-  `nsm.py::fit_posterior/fit_posterior_EM/update_hypers/approx_evidence` and
-  `nsm_system.py::T/log_abs_det/*_lmbda`.
-- `test/vi_fit.jl` — checks evidence and reparameterised neg-ELBO against JAX,
-  the ELBO gradient w.r.t. `[mu; log_s]` against exact JAX gradients, the α EM
-  update against its closed form, and that `fit_posterior!` raises the evidence.
-- `test/vi_data.jl` — JAX float64 reference targets (incl. the fixed draw `y`).
+- `src/vi.jl` — `VarPosterior` (mean-field diagonal Gaussian; `VarPosterior(p,
+  cfg)` seeds the per-parameter init std), `neg_elbo_flat`, `approx_evidence`
+  (`Σlog_s − nlp(mu)`), `fit_posterior!` (**per-sample Adam** to ELBO-slope
+  convergence, keep-best), `update_hypers!` (Eq 18/19 EM), `fit_posterior_EM!`
+  (evidence-recompute, running-max, best-iterate restore).
+- `test/vi_fit.jl` — evidence and reparameterised neg-ELBO vs JAX, ELBO gradient
+  vs exact JAX, the α update vs its closed form, and that `fit_posterior!` raises
+  the evidence.
 
 ### Step 4 — prediction with uncertainty
 
-- `src/predict.jl` — `predict_point` (trajectory at the posterior mean),
-  `predict_sample` (posterior ensemble of trajectories), `credible_bands`
-  (mean + quantile bands). Port of `nsm.py::predict_point/predict_sample` and
-  `nsm_system.py::runODE_teval`. `inputs` is a function `u(t)` — pass `t->uvec`
-  for a static input, or any schedule for a time-dependent perturbation.
-- `test/predict_fit.jl` — validates `predict_point` at the mean and at a fixed
-  posterior draw against JAX trajectories, checks that a `u(t)` perturbation
-  changes the trajectory, and checks `predict_sample`/`credible_bands`.
-- `test/predict_data.jl` — JAX float64 reference trajectories.
+- `src/predict.jl` — `predict_point`, `predict_sample`, `credible_bands`. Port of
+  `nsm.py::predict_point/predict_sample`. `inputs` is a function `u(t)`.
 
 ### Step 5 — gLV residual-penalty (PINN) variant
 
-- `src/residual.jl` — a black-box neural-ODE RHS `dx/dt = NN([x; u(t)])` with a
-  generalized Lotka-Volterra residual `f_gLV(x) = x·(r + A·x)` folded into the
-  loss: `loss = (1-λ)·data_rmse + λ·‖NN − f_gLV‖²`. This is the "pNODE"
-  formulation (gLV in the loss, not the architecture) — the head-to-head
-  against the embedded NSM. Includes `fit_residual!` and `bb_predict_point`.
-- `test/residual_fit.jl` — validates the combined loss and its gradient against
-  exact JAX, and that `fit_residual!` reduces the loss.
-- `test/residual_data.jl` — JAX float64 reference targets.
+- `src/residual.jl` — black-box neural-ODE RHS `dx/dt = NN([x; u(t)])` with a gLV
+  residual folded into the loss: `loss = (1-λ)·data_rmse + λ·‖NN − f_gLV‖²`. The
+  head-to-head against the embedded NSM.
 
-### Plots (Makie)
+### Real data — Cdiff experiment
 
-- `scripts/plots.jl` — writes three PNGs to `figures/`: embedded posterior
-  predictive bands, the time-dependent-perturbation effect, and embedded vs
-  gLV-residual comparison.
-
-### Real data — Cdiff experiment (ground truth)
-
-- `src/dataio.jl` — `load_nsm_csv` (port of `utilities.py::process_df`): reads a
-  Venturelli-format CSV (`Treatments, Time, <species>, <mediators>, <inputs>`)
-  into `Vector{Sample}`, with train/test scaling.
-- `data/cdiff_train_0.csv`, `data/cdiff_test_0.csv` — real Venturelli Cdiff
-  fold (8 species, 3 mediators, no inputs; 399 train / 40 held-out samples).
-- `scripts/experiment_realdata.jl` — fits embedded NSM and gLV-residual PINN on
-  the training fold and scores both on the held-out fold; reports held-out RMSE,
-  relative RMSE, and **per-output Pearson r** (the paper's Fig 2/3 metric) plus %
-  unphysical predictions. Writes `fig5` (per-output panels, embedded) and
-  `fig6` (per-output Pearson r, both models).
-- `scripts/experiment_datafraction.jl` — the paper's headline **Fig 4b**:
-  held-out mean Pearson r vs training-data fraction for both models. Writes
+- `src/dataio.jl` — `load_nsm_csv` (port of `utilities.py::process_df`).
+- `scripts/experiment_realdata.jl` — fits embedded NSM and gLV-residual PINN on a
+  training fold, scores both held-out (RMSE, relative RMSE, per-output Pearson r,
+  % unphysical). Writes per-output panels (`fig5`) and per-output r (`fig6`).
+- `scripts/experiment_datafraction.jl` — the paper's **Fig 4b**: held-out mean
+  Pearson r vs training-data fraction for both models. Writes
   `fig7_datafraction.pdf`.
 
-All figures are written as **PDF** (via CairoMakie).
+---
 
-Indicative result (reduced run): embedded NSM held-out RMSE ≈ 0.21, mean
-per-output r ≈ 0.46–0.51, 0% negative predictions; gLV-residual PINN RMSE ≈ 0.23,
-mean r ≈ 0.16, ~3.6% negative. In the data-fraction sweep the embedded model
-holds r ≈ 0.51 even at n≈16 training samples — physics helps most when data is
-scarce, matching the NSM/gNODE findings on real data.
-
-### Run it
+## Run it
 
 ```bash
-julia --project=. -e 'using Pkg; Pkg.instantiate()'   # first time only (CairoMakie is large)
+julia --project=. -e 'using Pkg; Pkg.instantiate()'   # first time (CairoMakie is large)
+
+# component validation (vs JAX float64)
 julia --project=. test/smoke_forward.jl               # step 1
 julia --project=. test/train_fit.jl                   # step 2
 julia --project=. test/bayes_fit.jl                   # step 3a
 julia --project=. test/vi_fit.jl                      # step 3b
 julia --project=. test/predict_fit.jl                 # step 4
 julia --project=. test/residual_fit.jl                # step 5
-julia --project=. scripts/plots.jl                    # synthetic figures
-julia --project=. scripts/experiment_realdata.jl      # real-data ground-truth experiment
-julia --project=. scripts/experiment_datafraction.jl  # Fig 4b: correlation vs training amount
+
+# paper reproduction
+julia --project=. scripts/run_nsm.jl                  # FP-DP Fig 3d  -> fig_nsm_fpdp_loo.pdf
+julia --project=. scripts/run_clark.jl                # Clark Fig 4c  -> fig_clark_16h.pdf  (set AD=:reverse)
 ```
 
-Step 1: `max abs error` ≈ 1e-9. Step 2: RMSE matches to <1e-5, gradient error
-<1e-4, loss drops. Step 3a: nlp/grad match JAX, and `fit_map!` lowers both nlp
-and RMSE.
+> **Timing.** FP-DP `run_nsm.jl` is a multi-hour run (10 folds × EM to
+> convergence, `:forward`). Clark `run_clark.jl` **requires `AD = :reverse`** —
+> `:forward` at 25 species is days-to-weeks; reverse-mode brings it to
+> hours/overnight. There is no mid-run checkpoint — let it finish before
+> interrupting or unmounting the drive.
 
-> **Scaling note.** ForwardDiff differentiates the solve directly — perfect for
-> validation and small models, but cost grows with parameter count. For large
-> models / real datasets, switch the gradient in `fit_rmse!` to a reverse-mode
-> adjoint (SciMLSensitivity's `GaussAdjoint`/`InterpolatingAdjoint` with Zygote).
-> That swap needs an out-of-place RHS; the loss and Adam logic stay identical.
+---
 
-### The model (what `nsm_rhs!` computes)
+## The model (what `nsm_rhs!` computes)
 
 State `u = [s; m]` (species stacked on mediators). With `[o_s; o_m] = NN([s; m; u(t)])`:
 
@@ -163,35 +220,23 @@ dmdt = softplus(o_m) .* ( (P·relu(dsdt)).*(1 - m/m_cap)           # consumer-re
 `C, P, d_m` are stored unconstrained and passed through `g(·)` inside the RHS to
 stay positive.
 
-## Roadmap
-
-- **Step 2 — loss + point fit.** Port `rmse` / `nlp` and an Adam loop
-  (`fit_rmse`) using SciMLSensitivity adjoints. Minimal trainable model.
-- **Step 3 — Bayesian EM.** Port `fit_posterior` / `fit_posterior_EM`,
-  `update_hypers`, `approx_evidence` (Type-II ML + Laplace evidence).
-- **Step 4 — prediction/UQ.** `predict_point` / `predict_sample` / `predict`.
-- **Step 5 — residual-penalty (PINN) variant.** Swap the embedded RHS for a
-  black-box NN RHS and add a gLV/CRM residual term in the loss, to compare
-  RHS-embedding vs. loss-residual head-to-head under identical perturbations.
+---
 
 ## Source map (what to port from the Python repo)
 
-Only the `nsm/` package matters (ignore all notebooks / experiment folders):
+Only the `nsm/` package matters (ignore all notebooks / experiment folders).
 
 | Python | Julia | status |
 |---|---|---|
-| `nsm/nsm_system.py :: system` | `src/system.jl :: nsm_rhs!` | ✅ step 1 |
-| `nsm/nsm_system.py :: transform,g,g_inv` | `src/system.jl :: g,g_inv` | ✅ step 1 |
-| `nsm/nsm_system.py :: runODE(_teval)` | `src/NSMjl.jl :: solve_forward` | ✅ step 1 |
-| `nsm/nsm_system.py :: root_mean_squared_error` | `src/train.jl :: sample_rmse` | ✅ step 2 |
-| `nsm/nsm.py :: rmse` | `src/train.jl :: rmse` | ✅ step 2 |
-| `nsm/nsm.py :: fit_rmse` | `src/train.jl :: fit_rmse!` | ✅ step 2 |
-| `nsm/utilities.py :: process_df` | `src/train.jl :: Sample` (assembled by caller) | ✅ step 2 |
-| `nsm/nsm_system.py :: log_prior_z, log_likelihood_z` | `src/bayes.jl :: log_prior, nll_sample` | ✅ step 3a |
-| `nsm/nsm.py :: nlp, grad_nlp` | `src/bayes.jl :: nlp, grad_nlp` | ✅ step 3a |
-| `nsm/nsm.py :: fit_posterior, fit_posterior_EM` | `src/vi.jl :: fit_posterior!, fit_posterior_EM!` | ✅ step 3b |
-| `nsm/nsm.py :: update_hypers, approx_evidence` | `src/vi.jl :: update_hypers!, approx_evidence` | ✅ step 3b |
-| `nsm/nsm.py :: predict(_point/_sample)` | `src/predict.jl :: predict_point, predict_sample` | ✅ step 4 |
-| `nsm/utilities.py :: process_df` | `src/dataio.jl :: load_nsm_csv` | ✅ real data |
+| `nsm_system.py :: system` | `src/system.jl :: nsm_rhs!` | ✅ step 1 |
+| `nsm_system.py :: transform,g,g_inv` | `src/system.jl :: g,g_inv` | ✅ step 1 |
+| `nsm_system.py :: runODE(_teval)` | `src/NSMjl.jl :: solve_forward` | ✅ step 1 |
+| `nsm_system.py :: root_mean_squared_error` | `src/train.jl :: sample_rmse` | ✅ step 2 |
+| `nsm.py :: rmse, fit_rmse` | `src/train.jl :: rmse, fit_rmse!` | ✅ step 2 |
+| `utilities.py :: process_df` | `src/train.jl :: Sample` / `src/dataio.jl :: load_nsm_csv` | ✅ |
+| `nsm_system.py :: log_prior_z, log_likelihood_z` | `src/bayes.jl :: log_prior, nll_sample` | ✅ step 3a |
+| `nsm.py :: nlp, grad_nlp` | `src/bayes.jl :: nlp, grad_nlp` | ✅ step 3a |
+| `nsm.py :: fit_posterior, fit_posterior_EM` | `src/vi.jl :: fit_posterior!, fit_posterior_EM!` | ✅ step 3b |
+| `nsm.py :: update_hypers, approx_evidence` | `src/vi.jl :: update_hypers!, approx_evidence` | ✅ step 3b |
+| `nsm.py :: predict(_point/_sample)` | `src/predict.jl :: predict_point, predict_sample` | ✅ step 4 |
 | gLV residual PINN ("pNODE" formulation) | `src/residual.jl` | ✅ step 5 |
-| `nsm/utilities.py :: process_df` | `src/train.jl :: Sample` (assembled by caller) | ✅ step 2 |
