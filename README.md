@@ -50,7 +50,8 @@ Train on all timepoints except 16h; predict the (0 → 16h) transition; fit with
 Reverse-mode adjoint (`AD = :reverse`) is required at this scale (~1,400 params).
 NRMSE = RMSE ÷ each metabolite's training-row max.
 
-| Metabolite | r     | NRMSE |
+
+| Metabolite | r     | NRMSE  |
 |------------|:-----:|:-----:|
 | Acetate    | 0.623 | 0.141 |
 | Butyrate   | 0.958 | 0.199 |
