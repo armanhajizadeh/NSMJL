@@ -2,8 +2,7 @@
 
 A from-scratch Julia implementation of the NSM model (Thompson et al. 2025,
 Venturelli lab): a mechanistic consumer-resource law embedded in a neural ODE,
-fit by variational Bayesian inference with EM hyperparameter optimization, with
-**time-dependent perturbation inputs** `u(t)` as a first-class feature.
+fit by variational Bayesian inference with EM hyperparameter optimization.
 
 ---
 
@@ -49,13 +48,14 @@ Negative (unphysical) predictions: 0.0%.
 Train on all timepoints except 16h; predict the (0 → 16h) transition; fit with
 `fit_posterior_EM!`, `n_hidden=20`. 757 treatments, 852 train / 95 test samples.
 Reverse-mode adjoint (`AD = :reverse`) is required at this scale (~1,400 params).
+NRMSE = RMSE ÷ each metabolite's training-row max.
 
-| Metabolite | r     | RMSE  |
+| Metabolite | r     | NRMSE |
 |------------|:-----:|:-----:|
-| Acetate    | 0.623 | 10.07 |
-| Butyrate   | 0.958 | 11.60 |
-| Lactate    | 0.857 | 11.28 |
-| Succinate  | 0.752 |  4.86 |
+| Acetate    | 0.623 | 0.141 |
+| Butyrate   | 0.958 | 0.199 |
+| Lactate    | 0.857 | 0.128 |
+| Succinate  | 0.752 | 0.086 |
 
 ---
 
@@ -106,7 +106,7 @@ parameters.
 
 ## The model (what `nsm_rhs!` computes)
 
-State `u = [s; m]` (species stacked on mediators). With `[o_s; o_m] = NN([s; m; u(t)])`:
+State `u = [s; m]` (species stacked on mediators). With `[o_s; o_m] = NN([s; m])`:
 
 ```
 dsdt = s .* o_s .* (1 - s/s_cap)                                  # eNODE (keeps s ≥ 0)
@@ -115,8 +115,7 @@ dmdt = softplus(o_m) .* ( (P·relu(dsdt)).*(1 - m/m_cap)           # consumer-re
 ```
 
 `C, P, d_m` are stored unconstrained and passed through `g(·)` inside the RHS to
-stay positive. `inputs` is a **function `u(t)`** evaluated inside the RHS at
-every solver step — the perturbation-aware extension.
+stay positive.
 
 ---
 
@@ -133,9 +132,7 @@ every solver step — the perturbation-aware extension.
 | `src/dataio.jl`  | `load_nsm_csv` (Venturelli-format CSV reader) |
 
 Each training `Sample` is an (initial condition → one later observation) pair
-integrated `0 → tf`. `uin` is a static per-sample input; swapping the `_ -> uin`
-closure in `predict_endpoint` for a sample-specific `u(t)` trains under a
-time-dependent perturbation with no other change.
+integrated `0 → tf`.
 
 ---
 
@@ -151,6 +148,21 @@ time-dependent perturbation with no other change.
 Component validation lives in `test/` (`smoke_forward.jl`, `train_fit.jl`,
 `bayes_fit.jl`, `vi_fit.jl`, `predict_fit.jl`) — each checks a stage's numerics
 and that its fitter improves the objective.
+
+---
+
+## Future work
+
+- **Time-dependent perturbation inputs `u(t)`.** Extend the RHS to evaluate an
+  input schedule `u(t)` at every solver step, so training can be driven by a
+  time-varying perturbation (e.g. an antibiotic time-course) rather than static
+  per-condition inputs.
+- **MiCRM-based PINN.** Swap the phenomenological consumer-resource metabolite
+  law for the Microbial Consumer-Resource Model — leakage fraction, a
+  cross-feeding stoichiometry matrix `D`, and latent (unmeasured) resources — as
+  the mechanistic prior: the NN sets species growth while MiCRM governs resource
+  dynamics with explicit mass conservation and species-to-species metabolic
+  hand-offs.
 
 ---
 
