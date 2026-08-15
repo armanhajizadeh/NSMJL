@@ -1,1 +1,2 @@
 *.ipynb linguist-detectable=false
+.DS_Store linguist-detectable=false
