@@ -10,18 +10,9 @@ fit by variational Bayesian inference with EM hyperparameter optimization.
 
 ### 1. FP-DP — leave-one-co-culture-out
 
-`scripts/run_nsm.jl` → `figures/fig_nsm_fpdp_loo.pdf`
+`scripts/run_nsm.jl` → `figures/fig_nsm_fpdp_loo.svg`
 
-<!--
-Source - https://stackoverflow.com/a/39793125
-Posted by Waylan, modified by community. See post 'Timeline' for change history
-Retrieved 2026-08-15, License - CC BY-SA 4.0
--->
-<object data="figures/fig_nsm_fpdp_loo.pdf" type="application/pdf" width="700px" height="700px">
-    <embed src="figures/fig_nsm_fpdp_loo.pdf">
-        <p>This browser does not support PDFs. Please download the PDF to view it: <a href="figures/fig_nsm_fpdp_loo.pdf">Download PDF</a>.</p>
-    </embed>
-</object>
+![FP-DP leave-one-co-culture-out](figures/fig_nsm_fpdp_loo.svg)
 
 Hold out one co-culture (`Pair_*`) per fold (10 folds); monocultures always in
 training and never scored; fit each fold with `fit_posterior_EM!`; pool the 10
@@ -37,21 +28,16 @@ Negative (unphysical) predictions: 0.0%.
 
 ### 2. Clark 25-species — 16h interpolation
 
-`scripts/run_clark.jl` → `figures/fig_clark_16h.pdf`
+`scripts/run_clark.jl` → `figures/fig_clark_16h.svg`
 
-<object data="figures/fig_clark_16h.pdf" type="application/pdf" width="700px" height="700px">
-    <embed src="figures/fig_clark_16h.pdf">
-        <p>This browser does not support PDFs. Please download the PDF to view it: <a href="figures/fig_clark_16h.pdf">Download PDF</a>.</p>
-    </embed>
-</object>
+![Clark 16h interpolation](figures/fig_clark_16h.svg)
 
 Train on all timepoints except 16h; predict the (0 → 16h) transition; fit with
 `fit_posterior_EM!`, `n_hidden=20`. 757 treatments, 852 train / 95 test samples.
 Reverse-mode adjoint (`AD = :reverse`) is required at this scale (~1,400 params).
 NRMSE = RMSE ÷ each metabolite's training-row max.
 
-
-| Metabolite | r     | NRMSE  |
+| Metabolite | r     | NRMSE |
 |------------|:-----:|:-----:|
 | Acetate    | 0.623 | 0.141 |
 | Butyrate   | 0.958 | 0.199 |
@@ -180,8 +166,8 @@ julia --project=. test/vi_fit.jl                      # step 3b
 julia --project=. test/predict_fit.jl                 # step 4
 
 # held-out reproductions
-julia --project=. scripts/run_nsm.jl                  # FP-DP  -> figures/fig_nsm_fpdp_loo.pdf
-julia --project=. scripts/run_clark.jl                # Clark  -> figures/fig_clark_16h.pdf  (set AD=:reverse)
+julia --project=. scripts/run_nsm.jl                  # FP-DP  -> figures/fig_nsm_fpdp_loo.svg
+julia --project=. scripts/run_clark.jl                # Clark  -> figures/fig_clark_16h.svg  (set AD=:reverse)
 ```
 
 > **Timing.** `run_nsm.jl` is a multi-hour run (10 folds × EM to convergence,
