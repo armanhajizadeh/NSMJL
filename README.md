@@ -50,12 +50,12 @@ Train on all timepoints except 16h; predict the (0 → 16h) transition; fit with
 `fit_posterior_EM!`, `n_hidden=20`. 757 treatments, 852 train / 95 test samples.
 Reverse-mode adjoint (`AD = :reverse`) is required at this scale (~1,400 params).
 
-| Metabolite | r     | RMSE  |
+| Metabolite | r     | NRMSE  |
 |------------|:-----:|:-----:|
-| Acetate    | 0.623 | 10.07 |
-| Butyrate   | 0.958 | 11.60 |
-| Lactate    | 0.857 | 11.28 |
-| Succinate  | 0.752 |  4.86 |
+| Acetate    | 0.623 | 0.141 |
+| Butyrate   | 0.958 | 0.199 |
+| Lactate    | 0.857 | 0.128 |
+| Succinate  | 0.752 |  0.086 |
 
 ---
 
